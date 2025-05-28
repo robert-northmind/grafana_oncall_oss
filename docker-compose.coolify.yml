@@ -1,0 +1,167 @@
+x-environment: &oncall-environment
+  DATABASE_TYPE: sqlite3
+  DATABASE_URL: ${DATABASE_URL:-sqlite:////var/lib/oncall/oncall.db}
+  BROKER_TYPE: redis
+  BASE_URL: ${DOMAIN}
+  SECRET_KEY: ${SECRET_KEY}
+  FEATURE_PROMETHEUS_EXPORTER_ENABLED: ${FEATURE_PROMETHEUS_EXPORTER_ENABLED:-false}
+  PROMETHEUS_EXPORTER_SECRET: ${PROMETHEUS_EXPORTER_SECRET:-}
+  REDIS_URI: redis://redis:6379/0
+  DJANGO_SETTINGS_MODULE: settings.hobby
+  CELERY_WORKER_QUEUE: "default,critical,long,slack,telegram,webhook,retry,celery,grafana"
+  CELERY_WORKER_CONCURRENCY: "1"
+  CELERY_WORKER_MAX_TASKS_PER_CHILD: "100"
+  CELERY_WORKER_SHUTDOWN_INTERVAL: "65m"
+  CELERY_WORKER_BEAT_ENABLED: "True"
+  GRAFANA_API_URL: http://grafana:3000
+  GRAFANA_CLOUD_ONCALL_API_URL: ${GRAFANA_CLOUD_ONCALL_API_URL:-}
+
+services:
+  engine:
+    image: grafana/oncall:latest
+    restart: unless-stopped
+    ports:
+      - "8081:8080"
+    command: sh -c "uwsgi --ini uwsgi.ini"
+    environment:
+      BASE_URL: ${BASE_URL}
+      SECRET_KEY: ${SECRET_KEY}
+      RABBITMQ_HOST: ${RABBITMQ_HOST:-rabbitmq}
+      RABBITMQ_PORT: ${RABBITMQ_PORT:-5672}
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-rabbitmq}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-rabbitmq}
+      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_DEFAULT_VHOST:-/}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-oncall}
+      MYSQL_DB_NAME: ${MYSQL_DB_NAME:-oncall_hobby}
+      MYSQL_USER: ${MYSQL_USER:-root}
+      MYSQL_HOST: ${MYSQL_HOST:-mysql}
+      MYSQL_PORT: ${MYSQL_PORT:-3306}
+      REDIS_URI: redis://redis:6379/0
+      DJANGO_SETTINGS_MODULE: settings.hobby
+      OSS_INSTALLATION: 1
+      GRAFANA_CLOUD_ONCALL_API_URL: ${GRAFANA_CLOUD_ONCALL_API_URL:-}
+      GRAFANA_CLOUD_ONCALL_TOKEN: ${GRAFANA_CLOUD_ONCALL_TOKEN:-}
+    volumes:
+      - oncall_data:/var/lib/oncall
+    depends_on:
+      oncall_db_migration:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    labels:
+      - "coolify.managed=true"
+      - "coolify.type=application"
+      - "coolify.name=oncall-engine"
+      - "coolify.port=8080"
+      - "coolify.domain=${ONCALL_DOMAIN}"
+
+  celery:
+    image: grafana/oncall:latest
+    restart: unless-stopped
+    command: sh -c "./celery_with_exporter.sh"
+    environment:
+      BASE_URL: ${BASE_URL}
+      SECRET_KEY: ${SECRET_KEY}
+      RABBITMQ_HOST: ${RABBITMQ_HOST:-rabbitmq}
+      RABBITMQ_PORT: ${RABBITMQ_PORT:-5672}
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-rabbitmq}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-rabbitmq}
+      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_DEFAULT_VHOST:-/}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-oncall}
+      MYSQL_DB_NAME: ${MYSQL_DB_NAME:-oncall_hobby}
+      MYSQL_USER: ${MYSQL_USER:-root}
+      MYSQL_HOST: ${MYSQL_HOST:-mysql}
+      MYSQL_PORT: ${MYSQL_PORT:-3306}
+      REDIS_URI: redis://redis:6379/0
+      DJANGO_SETTINGS_MODULE: settings.hobby
+      OSS_INSTALLATION: 1
+      GRAFANA_CLOUD_ONCALL_API_URL: ${GRAFANA_CLOUD_ONCALL_API_URL:-}
+      GRAFANA_CLOUD_ONCALL_TOKEN: ${GRAFANA_CLOUD_ONCALL_TOKEN:-}
+    volumes:
+      - oncall_data:/var/lib/oncall
+    depends_on:
+      oncall_db_migration:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    labels:
+      - "coolify.managed=true"
+      - "coolify.type=worker"
+      - "coolify.name=oncall-celery"
+
+  oncall_db_migration:
+    image: grafana/oncall
+    command: python manage.py migrate --noinput
+    environment: *oncall-environment
+    volumes:
+      - oncall_data:/var/lib/oncall
+    depends_on:
+      redis:
+        condition: service_healthy
+    labels:
+      - "coolify.managed=true"
+      - "coolify.type=job"
+      - "coolify.name=oncall-migration"
+
+  redis:
+    image: redis:7.0.15
+    restart: always
+    expose:
+      - 6379
+    volumes:
+      - redis_data:/data
+    deploy:
+      resources:
+        limits:
+          memory: 500m
+          cpus: "0.5"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      timeout: 5s
+      interval: 5s
+      retries: 10
+    labels:
+      - "coolify.managed=true"
+      - "coolify.type=database"
+      - "coolify.name=oncall-redis"
+
+  grafana:
+    image: "grafana/${GRAFANA_IMAGE:-grafana:latest}"
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      GF_FEATURE_TOGGLES_ENABLE: externalServiceAccounts,pluginExtensions
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS: grafana-oncall-app
+      GF_INSTALL_PLUGINS: grafana-oncall-app
+      GF_AUTH_MANAGED_SERVICE_ACCOUNTS_ENABLED: true
+      GRAFANA_CLOUD_ONCALL_API_URL: ${GRAFANA_CLOUD_ONCALL_API_URL:-}
+    volumes:
+      - grafana_data:/var/lib/grafana
+    deploy:
+      resources:
+        limits:
+          memory: 500m
+          cpus: "0.5"
+    configs:
+      - source: grafana.ini
+        target: /etc/grafana/grafana.ini
+    labels:
+      - "coolify.managed=true"
+      - "coolify.type=application"
+      - "coolify.name=grafana"
+      - "coolify.port=3000"
+      - "coolify.domain=${GRAFANA_DOMAIN}"
+
+volumes:
+  grafana_data:
+  oncall_data:
+  redis_data:
+
+configs:
+  grafana.ini:
+    content: |
+      [feature_toggles]
+      accessControlOnCall = false
