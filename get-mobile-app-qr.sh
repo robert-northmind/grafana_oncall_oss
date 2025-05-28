@@ -53,8 +53,14 @@ echo "$QR_DATA" | jq .
 TOKEN=$(echo "$QR_DATA" | jq -r '.token')
 URL=$(echo "$QR_DATA" | jq -r '.oncall_api_url')
 
+# Override the URL with the correct BASE_URL from .env
 echo ""
-echo "📋 Connection Details:"
+echo "⚠️  Backend returned URL: $URL"
+echo "✅ Using correct URL: $BASE_URL"
+URL="$BASE_URL"
+
+echo ""
+echo "�� Connection Details:"
 echo "   Token: $TOKEN"
 echo "   OnCall URL: $URL"
 echo ""
